@@ -16,3 +16,4 @@ serde_json = "1"
 winreg = "0.52"
 protocol = { path = "../protocol" }
 winrt-notification = "0.5"
+tiny-skia = "0.11"

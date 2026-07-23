@@ -1889,6 +1889,7 @@ dependencies = [
  "protocol",
  "serde",
  "serde_json",
+ "tiny-skia",
  "tray-icon",
  "winit",
  "winreg",
@@ -2025,6 +2026,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
+ "png",
  "tiny-skia-path",
 ]
 

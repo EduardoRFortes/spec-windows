@@ -5,7 +5,8 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$SettingsPath,
-    [Parameter(Mandatory = $true)][string]$HookBin
+    [Parameter(Mandatory = $true)][string]$HookBin,
+    [Parameter(Mandatory = $false)][string]$StatusLineBin
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,6 +72,25 @@ if ($alreadyInstalled) {
     }
     $data.hooks.PreToolUse = @($preToolUse) + @($newGroup)
     Write-Output "Hook de permissão registrado ($HookBin)."
+}
+
+if ($StatusLineBin) {
+    # statusLine always runs through a shell (Git Bash if installed, else
+    # PowerShell) -- unlike PreToolUse hooks, there's no "args" exec-form
+    # escape hatch here. Git Bash treats backslashes as escapes, so the
+    # path has to use forward slashes or it silently fails to run.
+    $statusLineBinFwd = $StatusLineBin.Replace("\", "/")
+    $hasStatusLine = Get-Member -InputObject $data -Name "statusLine" -MemberType NoteProperty
+
+    if ($hasStatusLine -and $data.statusLine.command -eq $statusLineBinFwd) {
+        Write-Output "statusLine do Spec ja registrada, nada a fazer."
+    } elseif ($hasStatusLine) {
+        Write-Output "Ja existe uma statusLine configurada (nao e a do Spec) -- nao vou sobrescrever."
+    } else {
+        $statusLineValue = New-Object PSObject -Property @{ type = "command"; command = $statusLineBinFwd }
+        $data | Add-Member -NotePropertyName "statusLine" -NotePropertyValue $statusLineValue
+        Write-Output "statusLine registrada ($statusLineBinFwd)."
+    }
 }
 
 $json = $data | ConvertTo-Json -Depth 10

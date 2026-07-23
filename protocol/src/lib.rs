@@ -41,6 +41,35 @@ impl Request {
     }
 }
 
+/// hook (spec-statusline) -> daemon, fire-and-forget: no ack/decision, the
+/// daemon just updates its cached snapshot for the tray icon/tooltip.
+#[derive(Serialize, Deserialize, Default)]
+pub struct Usage {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub five_hour_pct: Option<f64>,
+    pub five_hour_resets_at: Option<i64>,
+    pub seven_day_pct: Option<f64>,
+    pub seven_day_resets_at: Option<i64>,
+}
+
+impl Usage {
+    pub fn new(
+        five_hour_pct: Option<f64>,
+        five_hour_resets_at: Option<i64>,
+        seven_day_pct: Option<f64>,
+        seven_day_resets_at: Option<i64>,
+    ) -> Self {
+        Self {
+            msg_type: "usage".to_string(),
+            five_hour_pct,
+            five_hour_resets_at,
+            seven_day_pct,
+            seven_day_resets_at,
+        }
+    }
+}
+
 /// daemon -> hook. One enum for both messages of that direction since the
 /// hook always knows which one it's expecting at each point in the
 /// handshake (ack first, decision second).
