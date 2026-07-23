@@ -6,11 +6,17 @@
 // spec-fedora's specd (registers pending requests, updates the tray,
 // replies with ack/decision).
 
+use std::thread;
+use std::time::Duration;
+
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
     Icon, TrayIconBuilder,
 };
 use winit::event_loop::{ControlFlow, EventLoop};
+
+mod tray_promote;
+use tray_promote::promote_tray_icon;
 
 /// Solid-color 16x16 placeholder until there's real tray art. Swapped out
 /// once the request/no-request icon states are designed.
@@ -37,6 +43,18 @@ fn main() {
         .with_icon(placeholder_icon())
         .build()
         .expect("tray icon");
+
+    // Explorer only creates our NotifyIconSettings entry after the first
+    // Shell_NotifyIcon call above, and that can lag a little — retry for a
+    // few seconds instead of trying once.
+    thread::spawn(|| {
+        for _ in 0..10 {
+            if promote_tray_icon() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+    });
 
     let menu_channel = MenuEvent::receiver();
 
