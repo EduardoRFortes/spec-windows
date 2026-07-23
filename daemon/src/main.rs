@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 
 use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions, Stream};
 use protocol::{pipe_name, Request, Response, Usage};
-use tiny_skia::Color;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     TrayIcon, TrayIconBuilder,
@@ -35,19 +34,9 @@ use tray_promote::promote_tray_icon;
 /// connection, so this mostly just cleans up the stale menu entry.
 const PENDING_SAFETY_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// How fast the tray icon alternates between the calm and alert mascot
-/// color while a request is waiting — the only proactive attention-getter
-/// besides the one-shot toast, since Windows offers no "shake" for tray
-/// icons the way some other things do.
-const BLINK_INTERVAL: Duration = Duration::from_millis(500);
-
-fn mascot_calm() -> Color {
-    Color::from_rgba8(0x2b, 0x8a, 0x3e, 0xff)
-}
-
-fn mascot_alert() -> Color {
-    Color::from_rgba8(0xe6, 0x7e, 0x22, 0xff)
-}
+/// Idle animation only — a slow blink, not tied to pending requests (the
+/// toast notification is what's supposed to get your attention for those).
+const IDLE_BLINK_INTERVAL: Duration = Duration::from_secs(5);
 
 struct PendingRequest {
     request_id: String,
@@ -289,7 +278,7 @@ fn main() {
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(initial_menu))
         .with_tooltip(tooltip_text(&no_usage))
-        .with_icon(render_icon(mascot_calm(), &no_usage))
+        .with_icon(render_icon(true, &no_usage))
         .build()
         .expect("tray icon");
 
@@ -314,7 +303,7 @@ fn main() {
         five_hour_pct: None,
         seven_day_pct: None,
     };
-    let mut blink_lit = false;
+    let mut eyes_open = true;
     let mut last_blink = Instant::now();
 
     event_loop
@@ -325,7 +314,6 @@ fn main() {
 
             let mut menu_dirty = false;
             let mut icon_dirty = false;
-            let had_pending_before = !pending.is_empty();
 
             while let Ok(ev) = daemon_rx.try_recv() {
                 match ev {
@@ -370,20 +358,14 @@ fn main() {
                 rebuild_menu(&tray, &quit_id, &pending, &usage);
             }
 
-            if pending.is_empty() {
-                if had_pending_before || blink_lit {
-                    blink_lit = false;
-                    icon_dirty = true;
-                }
-            } else if last_blink.elapsed() >= BLINK_INTERVAL {
-                blink_lit = !blink_lit;
+            if last_blink.elapsed() >= IDLE_BLINK_INTERVAL {
+                eyes_open = !eyes_open;
                 last_blink = Instant::now();
                 icon_dirty = true;
             }
 
             if icon_dirty {
-                let color = if blink_lit { mascot_alert() } else { mascot_calm() };
-                tray.set_icon(Some(render_icon(color, &usage))).ok();
+                tray.set_icon(Some(render_icon(eyes_open, &usage))).ok();
             }
         })
         .expect("event loop run");

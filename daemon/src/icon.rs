@@ -1,13 +1,16 @@
 // Tray icon rendering: the Claude Code mascot silhouette (ported from
 // spec-fedora's daemon/specd/icons/spec-symbolic.svg — same path data,
 // same evenodd fill rule for the ear notches) plus two usage bars baked
-// into the bottom strip the mascot's legs leave empty (viewBox y=90..100).
+// into the bottom strip the mascot's legs leave empty (viewBox y=90..100),
+// plus a pair of eye cutouts in the head band that swap between "open"
+// (small squares) and "closed" (thin bars) for a slow idle blink — see
+// main.rs's IDLE_BLINK_INTERVAL. Not tied to pending requests at all
+// anymore; that's the toast notification's job now.
 //
 // Windows tray icons are a plain bitmap with no GNOME-style "symbolic,
-// theme recolors it" convention, so colors are fixed here instead: the
-// mascot itself tints between a calm and an alert color while a request is
-// pending (see main.rs's blink loop), and the two bars are colored by how
-// close each is to its limit.
+// theme recolors it" convention, so the mascot's color is fixed here
+// instead (Claude's brand orange) rather than inherited from a taskbar
+// theme.
 
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 use tray_icon::Icon;
@@ -17,7 +20,15 @@ const CANVAS: u32 = 32;
 /// those units and scaled down to CANVAS at fill time.
 const SCALE: f32 = CANVAS as f32 / 100.0;
 
-fn mascot_path() -> Path {
+fn add_rect(pb: &mut PathBuilder, x0: f32, y0: f32, x1: f32, y1: f32) {
+    pb.move_to(x0, y0);
+    pb.line_to(x1, y0);
+    pb.line_to(x1, y1);
+    pb.line_to(x0, y1);
+    pb.close();
+}
+
+fn mascot_path(eyes_open: bool) -> Path {
     let mut pb = PathBuilder::new();
     let rects: [(f32, f32, f32, f32); 7] = [
         (9.0, 10.0, 91.0, 28.0),  // head top band
@@ -29,11 +40,7 @@ fn mascot_path() -> Path {
         (82.0, 69.0, 91.0, 90.0), // leg 4
     ];
     for (x0, y0, x1, y1) in rects {
-        pb.move_to(x0, y0);
-        pb.line_to(x1, y0);
-        pb.line_to(x1, y1);
-        pb.line_to(x0, y1);
-        pb.close();
+        add_rect(&mut pb, x0, y0, x1, y1);
     }
     // Ear notches: evenodd fill makes these subtract from the ears band
     // above rather than add to it, same as the source SVG.
@@ -45,6 +52,16 @@ fn mascot_path() -> Path {
     pb.line_to(83.0, 42.0);
     pb.line_to(68.0, 35.0);
     pb.close();
+    // Eyes, same evenodd-subtraction trick as the ear notches: small dot
+    // squares when open, thin bars when closed, centered in the head band.
+    for cx in [30.0, 70.0] {
+        let cy = 19.0;
+        if eyes_open {
+            add_rect(&mut pb, cx - 3.5, cy - 3.5, cx + 3.5, cy + 3.5);
+        } else {
+            add_rect(&mut pb, cx - 5.0, cy - 1.25, cx + 5.0, cy + 1.25);
+        }
+    }
     pb.finish().expect("mascot path is well-formed")
 }
 
@@ -100,13 +117,17 @@ pub struct UsageSnapshot {
     pub seven_day_pct: Option<f64>,
 }
 
-/// `mascot_color` carries the pending-request blink state; usage bars are
-/// colored independently by their own percentage.
-pub fn render_icon(mascot_color: Color, usage: &UsageSnapshot) -> Icon {
+/// Claude's brand orange — the mascot is always this color now; there's no
+/// more pending-request tint (the toast notification covers that signal).
+fn mascot_color() -> Color {
+    Color::from_rgba8(0xd9, 0x77, 0x57, 0xff)
+}
+
+pub fn render_icon(eyes_open: bool, usage: &UsageSnapshot) -> Icon {
     let mut pixmap = Pixmap::new(CANVAS, CANVAS).expect("nonzero canvas size");
     pixmap.fill_path(
-        &mascot_path(),
-        &solid_paint(mascot_color),
+        &mascot_path(eyes_open),
+        &solid_paint(mascot_color()),
         FillRule::EvenOdd,
         Transform::from_scale(SCALE, SCALE),
         None,
