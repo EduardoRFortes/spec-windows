@@ -21,10 +21,31 @@ use protocol::{pipe_name, Request, Response};
 const CONNECT_ACK_TIMEOUT: Duration = Duration::from_millis(300);
 const DECISION_TIMEOUT: Duration = Duration::from_secs(55);
 
+// TEMPORARY: diagnosing why real Claude Code invocations aren't reaching
+// specd even though manual test invocations do. stderr isn't visible when
+// Claude Code is the one launching this process, so this appends to a file
+// instead. Remove once the cause is found.
+fn debug_log(msg: &str) {
+    use std::io::Write as _;
+    let path = std::env::temp_dir().join("spec-hook-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[{:?}] {msg}", std::time::SystemTime::now());
+    }
+}
+
 #[derive(Deserialize)]
 struct HookInput {
     session_id: Option<String>,
     prompt_id: Option<String>,
+    // Unique per tool call. prompt_id is shared by every tool call within
+    // the same turn (a turn can invoke several tools), so it collides as a
+    // pending-request key when more than one is in flight — tool_use_id is
+    // the one that's actually unique per PreToolUse invocation.
+    tool_use_id: Option<String>,
     cwd: Option<String>,
     tool_name: Option<String>,
     permission_mode: Option<String>,
@@ -56,12 +77,26 @@ fn talk_to_daemon(input: &HookInput) -> Option<(String, Option<String>)> {
     let session_id = input.session_id.as_deref().unwrap_or("").to_string();
     let cwd = input.cwd.as_deref().unwrap_or("").to_string();
     let request_id = input
-        .prompt_id
+        .tool_use_id
         .clone()
+        .or_else(|| input.prompt_id.clone())
         .unwrap_or_else(|| format!("{session_id}-{tool_name}"));
 
-    let name = pipe_name().to_ns_name::<GenericNamespaced>().ok()?;
-    let mut conn = Stream::connect(name).ok()?;
+    let name = match pipe_name().to_ns_name::<GenericNamespaced>() {
+        Ok(n) => n,
+        Err(e) => {
+            debug_log(&format!("to_ns_name failed: {e}"));
+            return None;
+        }
+    };
+    let mut conn = match Stream::connect(name) {
+        Ok(c) => c,
+        Err(e) => {
+            debug_log(&format!("connect failed: {e}"));
+            return None;
+        }
+    };
+    debug_log("connected to daemon");
 
     let req = Request::new(
         request_id,
@@ -100,27 +135,38 @@ fn fail_open() -> ! {
 }
 
 fn main() {
+    debug_log("=== spec-hook invoked ===");
     let mut buf = String::new();
     if io::stdin().read_to_string(&mut buf).is_err() {
+        debug_log("stdin read failed");
         fail_open();
     }
+    debug_log(&format!("stdin ({} bytes): {buf:?}", buf.len()));
     // A leading UTF-8 BOM shows up when this is fed via some Windows
     // pipelines (e.g. PowerShell piping a string to a native process's
     // stdin); serde_json treats it as invalid input otherwise.
     let buf = buf.strip_prefix('\u{feff}').unwrap_or(&buf);
     let input: HookInput = match serde_json::from_str(buf) {
         Ok(v) => v,
-        Err(_) => fail_open(),
+        Err(e) => {
+            debug_log(&format!("json parse failed: {e}"));
+            fail_open();
+        }
     };
 
     // Only intervene in the plain interactive mode — see spec-fedora's
     // main.rs for why the other modes take precedence over Spec.
     if input.permission_mode.as_deref().is_some_and(|m| m != "default") {
+        debug_log(&format!(
+            "permission_mode not default: {:?}",
+            input.permission_mode
+        ));
         fail_open();
     }
 
     match talk_to_daemon(&input) {
         Some((decision, reason)) if decision == "allow" || decision == "deny" => {
+            debug_log(&format!("decision received: {decision}"));
             let reason = reason.unwrap_or_else(|| {
                 if decision == "deny" {
                     "Negado pela bandeja do Spec".to_string()
@@ -139,6 +185,9 @@ fn main() {
             let _ = writeln!(io::stdout(), "{}", out);
             exit(0);
         }
-        _ => fail_open(),
+        other => {
+            debug_log(&format!("talk_to_daemon returned {other:?}, failing open"));
+            fail_open();
+        }
     }
 }

@@ -21,6 +21,7 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
 };
 use winit::event_loop::{ControlFlow, EventLoop};
+use winrt_notification::{Duration as ToastDuration, Toast};
 
 mod tray_promote;
 use tray_promote::promote_tray_icon;
@@ -30,6 +31,12 @@ use tray_promote::promote_tray_icon;
 /// In practice the hook itself gives up after ~55s and closes the
 /// connection, so this mostly just cleans up the stale menu entry.
 const PENDING_SAFETY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How fast the tray icon alternates between the normal and alert colors
+/// while a request is waiting — the only proactive attention-getter
+/// besides the one-shot toast, since Windows offers no "shake" for tray
+/// icons the way some other things do.
+const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 struct PendingRequest {
     request_id: String,
@@ -45,28 +52,64 @@ enum DaemonEvent {
 
 /// Solid-color 16x16 placeholder until there's real tray art. Swapped out
 /// once the request/no-request icon states are designed.
-fn placeholder_icon() -> Icon {
+fn solid_icon(rgb: [u8; 3]) -> Icon {
     let size = 16u32;
     let mut rgba = Vec::with_capacity((size * size * 4) as usize);
     for _ in 0..(size * size) {
-        rgba.extend_from_slice(&[0x2b, 0x8a, 0x3e, 0xff]);
+        rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 0xff]);
     }
     Icon::from_rgba(rgba, size, size).expect("valid icon buffer")
 }
 
+fn normal_icon() -> Icon {
+    solid_icon([0x2b, 0x8a, 0x3e]) // green
+}
+
+fn alert_icon() -> Icon {
+    solid_icon([0xe6, 0x7e, 0x22]) // orange
+}
+
+/// One-shot toast for a newly arrived request. Uses the PowerShell AUMID
+/// since this isn't installed/packaged with its own — Windows will show it
+/// as coming from "Windows PowerShell" until that changes. Best-effort:
+/// notification failures shouldn't affect the actual allow/deny flow, so
+/// errors are only logged.
+fn notify_new_request(tool_name: &str, preview: &str) {
+    let result = Toast::new(Toast::POWERSHELL_APP_ID)
+        .title("Spec — pedido de permissão")
+        .text1(tool_name)
+        .text2(preview)
+        .duration(ToastDuration::Short)
+        .show();
+    if let Err(e) = result {
+        eprintln!("[specd] toast notification failed: {e:?}");
+    }
+}
+
 fn handle_connection(conn: Stream, tx: mpsc::Sender<DaemonEvent>) {
+    eprintln!("[specd] connection accepted");
     let mut reader = BufReader::new(conn);
     let mut line = String::new();
-    if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+    if let Err(e) = reader.read_line(&mut line) {
+        eprintln!("[specd] read_line failed: {e}");
         return;
     }
+    if line.trim().is_empty() {
+        eprintln!("[specd] empty line, dropping connection");
+        return;
+    }
+    eprintln!("[specd] received line: {line:?}");
     let req: Request = match serde_json::from_str(line.trim()) {
         Ok(r) => r,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("[specd] request parse failed: {e}");
+            return;
+        }
     };
     if req.msg_type != "request" {
         // Not implemented yet on this port: `usage`, fire-and-forget from
         // spec-statusline. Nothing to ack, just drop the connection.
+        eprintln!("[specd] unknown msg_type {:?}, dropping", req.msg_type);
         return;
     }
 
@@ -76,9 +119,11 @@ fn handle_connection(conn: Stream, tx: mpsc::Sender<DaemonEvent>) {
     let Ok(ack_line) = serde_json::to_string(&ack) else {
         return;
     };
-    if writeln!(reader.get_mut(), "{ack_line}").is_err() {
+    if let Err(e) = writeln!(reader.get_mut(), "{ack_line}") {
+        eprintln!("[specd] writing ack failed: {e}");
         return;
     }
+    eprintln!("[specd] ack sent for {}", req.request_id);
 
     let preview: String = serde_json::to_string(&req.tool_input)
         .unwrap_or_default()
@@ -99,16 +144,20 @@ fn handle_connection(conn: Stream, tx: mpsc::Sender<DaemonEvent>) {
 
     match reply_rx.recv_timeout(PENDING_SAFETY_TIMEOUT) {
         Ok((decision, reason)) => {
+            eprintln!("[specd] decision for {}: {decision}", req.request_id);
             let msg = Response::Decision {
                 request_id: req.request_id.clone(),
                 decision,
                 reason,
             };
             if let Ok(line) = serde_json::to_string(&msg) {
-                let _ = writeln!(reader.get_mut(), "{line}");
+                if let Err(e) = writeln!(reader.get_mut(), "{line}") {
+                    eprintln!("[specd] writing decision failed (client likely gone): {e}");
+                }
             }
         }
         Err(_) => {
+            eprintln!("[specd] {} expired unanswered", req.request_id);
             let _ = tx.send(DaemonEvent::Expired(req.request_id));
         }
     }
@@ -117,16 +166,29 @@ fn handle_connection(conn: Stream, tx: mpsc::Sender<DaemonEvent>) {
 fn spawn_pipe_listener(tx: mpsc::Sender<DaemonEvent>) {
     thread::spawn(move || {
         let Ok(name) = pipe_name().to_ns_name::<GenericNamespaced>() else {
+            eprintln!("[specd] pipe_name().to_ns_name() failed");
             return;
         };
-        let Ok(listener) = ListenerOptions::new().name(name).create_sync() else {
-            return;
+        let listener = match ListenerOptions::new().name(name).create_sync() {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[specd] FATAL: failed to bind pipe: {e}");
+                return;
+            }
         };
+        eprintln!("[specd] listening on pipe {:?}", pipe_name());
         for conn in listener.incoming() {
-            let Ok(conn) = conn else { continue };
+            let conn = match conn {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[specd] accept error: {e}");
+                    continue;
+                }
+            };
             let tx = tx.clone();
             thread::spawn(move || handle_connection(conn, tx));
         }
+        eprintln!("[specd] listener loop exited (should never happen)");
     });
 }
 
@@ -163,6 +225,7 @@ fn rebuild_menu(tray: &TrayIcon, quit_id: &MenuId, pending: &HashMap<String, Pen
 }
 
 fn main() {
+    eprintln!("[specd] starting, pid={}", std::process::id());
     let event_loop = EventLoop::new().expect("event loop");
 
     let quit_id = MenuId::new("quit");
@@ -174,7 +237,7 @@ fn main() {
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(initial_menu))
         .with_tooltip("spec-windows (protótipo)")
-        .with_icon(placeholder_icon())
+        .with_icon(normal_icon())
         .build()
         .expect("tray icon");
 
@@ -195,6 +258,8 @@ fn main() {
 
     let menu_channel = MenuEvent::receiver();
     let mut pending: HashMap<String, PendingRequest> = HashMap::new();
+    let mut blink_lit = false;
+    let mut last_blink = Instant::now();
 
     event_loop
         .run(move |_event, elwt| {
@@ -203,10 +268,12 @@ fn main() {
             ));
 
             let mut dirty = false;
+            let had_pending_before = !pending.is_empty();
 
             while let Ok(ev) = daemon_rx.try_recv() {
                 match ev {
                     DaemonEvent::NewRequest(req) => {
+                        notify_new_request(&req.tool_name, &req.tool_input_preview);
                         pending.insert(req.request_id.clone(), req);
                         dirty = true;
                     }
@@ -235,6 +302,18 @@ fn main() {
 
             if dirty {
                 rebuild_menu(&tray, &quit_id, &pending);
+            }
+
+            if pending.is_empty() {
+                if had_pending_before || blink_lit {
+                    tray.set_icon(Some(normal_icon())).ok();
+                    blink_lit = false;
+                }
+            } else if last_blink.elapsed() >= BLINK_INTERVAL {
+                blink_lit = !blink_lit;
+                last_blink = Instant::now();
+                let icon = if blink_lit { alert_icon() } else { normal_icon() };
+                tray.set_icon(Some(icon)).ok();
             }
         })
         .expect("event loop run");

@@ -41,6 +41,16 @@ do `spec-statusline`). Ver o PROTOCOL.md original para os exemplos de JSON
 e o detalhe de cada campo; não repetido aqui para não divergir por
 descuido — se o formato mudar, muda nos dois repos.
 
+**Uma diferença real, não só de transporte:** `request_id` aqui é o
+`tool_use_id` do payload do hook (fallback: `prompt_id`, depois
+`<session_id>-<tool_name>`) — não só `prompt_id` como o spec-fedora original
+documenta. Testando com o Claude Code de verdade no Windows, um único
+`prompt_id` é compartilhado por *todas* as chamadas de ferramenta dentro do
+mesmo turno (um turno pode chamar várias ferramentas), então usá-lo sozinho
+como chave faz um pedido pendente sobrescrever outro em silêncio quando mais
+de uma chamada está em voo ao mesmo tempo. `tool_use_id` é único por
+chamada.
+
 ## Timeouts (mesmos valores do spec-fedora)
 
 - **Handshake (~300ms, no hook):** cobre "o daemon não está rodando/travado".
