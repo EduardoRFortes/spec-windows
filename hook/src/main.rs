@@ -7,7 +7,7 @@
 // pipes, so the ack/decision reads run on a background thread and the
 // deadline is enforced with `mpsc::Receiver::recv_timeout` instead.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::exit;
@@ -16,6 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream};
+use protocol::{pipe_name, Request, Response};
 
 const CONNECT_ACK_TIMEOUT: Duration = Duration::from_millis(300);
 const DECISION_TIMEOUT: Duration = Duration::from_secs(55);
@@ -29,29 +30,6 @@ struct HookInput {
     permission_mode: Option<String>,
     #[serde(default)]
     tool_input: Value,
-}
-
-#[derive(Serialize)]
-struct SpecRequest<'a> {
-    #[serde(rename = "type")]
-    msg_type: &'static str,
-    request_id: &'a str,
-    session_id: &'a str,
-    cwd: &'a str,
-    tool_name: &'a str,
-    tool_input: &'a Value,
-}
-
-#[derive(Deserialize)]
-struct SpecResponse {
-    #[serde(rename = "type")]
-    msg_type: String,
-    decision: Option<String>,
-    reason: Option<String>,
-}
-
-fn pipe_name() -> String {
-    std::env::var("SPEC_PIPE").unwrap_or_else(|_| "spec.sock".to_string())
 }
 
 /// Reads one newline-delimited JSON line off a background thread and
@@ -74,29 +52,24 @@ fn read_line_with_timeout<R: Read + Send + 'static>(
 /// timeout, malformed response) surfaces as None, which the caller turns
 /// into fail-open.
 fn talk_to_daemon(input: &HookInput) -> Option<(String, Option<String>)> {
-    let tool_name = input.tool_name.as_deref().unwrap_or("");
-    let session_id = input.session_id.as_deref().unwrap_or("");
-    let cwd = input.cwd.as_deref().unwrap_or("");
-    let owned_request_id;
-    let request_id = match &input.prompt_id {
-        Some(id) => id.as_str(),
-        None => {
-            owned_request_id = format!("{}-{}", session_id, tool_name);
-            owned_request_id.as_str()
-        }
-    };
+    let tool_name = input.tool_name.as_deref().unwrap_or("").to_string();
+    let session_id = input.session_id.as_deref().unwrap_or("").to_string();
+    let cwd = input.cwd.as_deref().unwrap_or("").to_string();
+    let request_id = input
+        .prompt_id
+        .clone()
+        .unwrap_or_else(|| format!("{session_id}-{tool_name}"));
 
     let name = pipe_name().to_ns_name::<GenericNamespaced>().ok()?;
     let mut conn = Stream::connect(name).ok()?;
 
-    let req = SpecRequest {
-        msg_type: "request",
+    let req = Request::new(
         request_id,
         session_id,
         cwd,
         tool_name,
-        tool_input: &input.tool_input,
-    };
+        input.tool_input.clone(),
+    );
     let mut line = serde_json::to_string(&req).ok()?;
     line.push('\n');
     conn.write_all(line.as_bytes()).ok()?;
@@ -105,19 +78,19 @@ fn talk_to_daemon(input: &HookInput) -> Option<(String, Option<String>)> {
 
     // 1) Fast handshake: proves the daemon is alive and has the request.
     let (ack_line, reader) = read_line_with_timeout(reader, CONNECT_ACK_TIMEOUT)?;
-    let ack: SpecResponse = serde_json::from_str(ack_line.trim()).ok()?;
-    if ack.msg_type != "ack" {
-        return None;
+    match serde_json::from_str(ack_line.trim()).ok()? {
+        Response::Ack { .. } => {}
+        Response::Decision { .. } => return None,
     }
 
     // 2) Now wait (much longer, but still self-bounded) for the human.
     let (decision_line, _reader) = read_line_with_timeout(reader, DECISION_TIMEOUT)?;
-    let resp: SpecResponse = serde_json::from_str(decision_line.trim()).ok()?;
-    if resp.msg_type != "decision" {
-        return None;
+    match serde_json::from_str(decision_line.trim()).ok()? {
+        Response::Decision {
+            decision, reason, ..
+        } => Some((decision, reason)),
+        Response::Ack { .. } => None,
     }
-
-    resp.decision.map(|d| (d, resp.reason))
 }
 
 fn fail_open() -> ! {
@@ -131,7 +104,11 @@ fn main() {
     if io::stdin().read_to_string(&mut buf).is_err() {
         fail_open();
     }
-    let input: HookInput = match serde_json::from_str(&buf) {
+    // A leading UTF-8 BOM shows up when this is fed via some Windows
+    // pipelines (e.g. PowerShell piping a string to a native process's
+    // stdin); serde_json treats it as invalid input otherwise.
+    let buf = buf.strip_prefix('\u{feff}').unwrap_or(&buf);
+    let input: HookInput = match serde_json::from_str(buf) {
         Ok(v) => v,
         Err(_) => fail_open(),
     };
