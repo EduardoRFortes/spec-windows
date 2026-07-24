@@ -58,38 +58,47 @@ fn mascot_path() -> Path {
     pb.finish().expect("mascot path is well-formed")
 }
 
-/// Eye vertical center: low enough in the head band (10..28) to read as a
-/// face rather than sitting up near the top edge, but clear of the ear
-/// notches which start at y=28.
-const EYE_CY: f32 = 24.0;
+/// Eye vertical center, sized/positioned by eye against the actual mascot
+/// reference art (Downloads/HBSjoHSaEAA44Dk.jpg -- the "Welcome, Claw'd"
+/// image): big bold squares taking up a real chunk of the head band
+/// (10..28), not small dots.
+const EYE_CY: f32 = 20.0;
+const EYE_HALF: f32 = 6.5;
 
-/// Open eyes: two small solid black dots, filled *on top of* the mascot
+/// Open eyes: two big solid black squares, filled *on top of* the mascot
 /// silhouette rather than cut out of it -- a transparent cutout let the
 /// (dark) taskbar bleed through with an antialiasing halo that read as
-/// pale/white at tray size instead of a clean black dot.
+/// pale/white at tray size instead of a clean black square.
 fn eyes_open_path() -> Path {
     let mut pb = PathBuilder::new();
     for cx in [30.0, 70.0] {
-        add_rect(&mut pb, cx - 3.0, EYE_CY - 3.0, cx + 3.0, EYE_CY + 3.0);
+        add_rect(
+            &mut pb,
+            cx - EYE_HALF,
+            EYE_CY - EYE_HALF,
+            cx + EYE_HALF,
+            EYE_CY + EYE_HALF,
+        );
     }
     pb.finish().expect("eyes path is well-formed")
 }
 
 /// Closed eyes: a content/squinting "><" -- left eye a ">" chevron
 /// (pointing right, toward the nose), right eye a "<" (pointing left) --
-/// stroked rather than filled, so it reads as two thin V shapes instead of
-/// a flat closed-eyelid bar.
+/// stroked rather than filled, matching the reference sticker
+/// (Downloads/st,small,507x507-pad,600x600,f8f8f8.jpg). Same bounding box
+/// as the open-eye squares so the blink doesn't change the apparent eye
+/// size, just the shape.
 fn eyes_closed_path() -> Path {
     let mut pb = PathBuilder::new();
-    let (hw, hh) = (4.0, 4.0);
     // Left eye: ">"
-    pb.move_to(30.0 - hw, EYE_CY - hh);
-    pb.line_to(30.0 + hw, EYE_CY);
-    pb.line_to(30.0 - hw, EYE_CY + hh);
+    pb.move_to(30.0 - EYE_HALF, EYE_CY - EYE_HALF);
+    pb.line_to(30.0 + EYE_HALF, EYE_CY);
+    pb.line_to(30.0 - EYE_HALF, EYE_CY + EYE_HALF);
     // Right eye: "<"
-    pb.move_to(70.0 + hw, EYE_CY - hh);
-    pb.line_to(70.0 - hw, EYE_CY);
-    pb.line_to(70.0 + hw, EYE_CY + hh);
+    pb.move_to(70.0 + EYE_HALF, EYE_CY - EYE_HALF);
+    pb.line_to(70.0 - EYE_HALF, EYE_CY);
+    pb.line_to(70.0 + EYE_HALF, EYE_CY + EYE_HALF);
     pb.finish().expect("eyes path is well-formed")
 }
 
@@ -129,7 +138,7 @@ pub fn render_icon(eyes_open: bool) -> Icon {
         );
     } else {
         let stroke = Stroke {
-            width: 3.5,
+            width: 5.5,
             line_cap: LineCap::Round,
             line_join: LineJoin::Round,
             ..Default::default()

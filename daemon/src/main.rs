@@ -51,18 +51,20 @@ fn bar(pct: f64, width: usize) -> String {
     format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(width - filled))
 }
 
+/// A tab, not a space, between label and bar: "Sessão" renders narrower
+/// than "Semana" in Segoe UI even though both are six characters (the two
+/// esses are narrow, "Semana"'s m/n are wide), so padding with more spaces
+/// is just guessing at a pixel offset. A tab jumps to the same fixed
+/// tab-stop column on every line regardless of label width, which is what
+/// actually lines the two bars up.
 fn usage_line(label: &str, pct: Option<f64>) -> String {
     match pct {
-        Some(p) => format!("{label} {} {p:.0}%", bar(p, 10)),
-        None => format!("{label} ?"),
+        Some(p) => format!("{label}\t{} {p:.0}%", bar(p, 10)),
+        None => format!("{label}\t?"),
     }
 }
 
-/// "Sessão" renders narrower than "Semana" in Segoe UI even though both are
-/// six characters (the two esses are narrow, "Semana"'s m/n are wide) --
-/// this pads it so both bars start at the same x position instead of the
-/// session one sitting visibly left of the week one.
-const SESSION_LABEL: &str = "Sessão ";
+const SESSION_LABEL: &str = "Sessão";
 const WEEK_LABEL: &str = "Semana";
 
 /// How often the daemon safety-net gives up on an unanswered request if
