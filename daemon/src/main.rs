@@ -8,6 +8,13 @@
 // messages — Wait would only wake on real OS/menu events, and a tray-only
 // app doesn't generate enough of those to notice new requests promptly.
 
+// No console window ever, not even a flash at boot when Task Scheduler
+// launches this at logon -- this is a tray app, not a CLI tool. Without
+// this, Windows treats it as a console-subsystem binary and briefly shows
+// a black window every time it starts. println!/eprintln! below still work
+// fine with no console attached (Rust's stdio no-ops instead of erroring).
+#![windows_subsystem = "windows"]
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc;
