@@ -58,6 +58,13 @@ fn usage_line(label: &str, pct: Option<f64>) -> String {
     }
 }
 
+/// "Sessão" renders narrower than "Semana" in Segoe UI even though both are
+/// six characters (the two esses are narrow, "Semana"'s m/n are wide) --
+/// this pads it so both bars start at the same x position instead of the
+/// session one sitting visibly left of the week one.
+const SESSION_LABEL: &str = "Sessão ";
+const WEEK_LABEL: &str = "Semana";
+
 /// How often the daemon safety-net gives up on an unanswered request if
 /// nobody clicks Allow/Deny — matches the 600s ceiling from PROTOCOL.md.
 /// In practice the hook itself gives up after ~55s and closes the
@@ -242,12 +249,12 @@ fn rebuild_menu(
 
     if usage.five_hour_pct.is_some() || usage.seven_day_pct.is_some() {
         let _ = menu.append(&MenuItem::new(
-            usage_line("Sessão", usage.five_hour_pct),
+            usage_line(SESSION_LABEL, usage.five_hour_pct),
             false,
             None,
         ));
         let _ = menu.append(&MenuItem::new(
-            usage_line("Semana", usage.seven_day_pct),
+            usage_line(WEEK_LABEL, usage.seven_day_pct),
             false,
             None,
         ));
@@ -290,8 +297,8 @@ fn tooltip_text(usage: &UsageSnapshot) -> String {
     }
     format!(
         "{}\n{}",
-        usage_line("Sessão", usage.five_hour_pct),
-        usage_line("Semana", usage.seven_day_pct)
+        usage_line(SESSION_LABEL, usage.five_hour_pct),
+        usage_line(WEEK_LABEL, usage.seven_day_pct)
     )
 }
 

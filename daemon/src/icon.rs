@@ -1,10 +1,10 @@
 // Tray icon rendering: the Claude Code mascot silhouette (ported from
 // spec-fedora's daemon/specd/icons/spec-symbolic.svg — same path data,
 // same evenodd fill rule for the ear notches), plus a pair of solid black
-// eyes in the head band that swap between "open" (small squares) and
-// "closed" (thin bars) for a slow idle blink — see main.rs's
-// IDLE_BLINK_INTERVAL. Not tied to pending requests at all; that's the
-// toast notification's job now.
+// eyes in the head band that swap between "open" (small dots) and
+// "closed" (a squinting "><" chevron pair) for a slow idle blink — see
+// main.rs's IDLE_BLINK_INTERVAL. Not tied to pending requests at all;
+// that's the toast notification's job now.
 //
 // No usage bars here anymore -- Windows renders tray icons at ~16px, and
 // two 2px-tall bars at that scale were unreadable (the user's own words:
@@ -18,7 +18,9 @@
 // instead (Claude's brand orange) rather than inherited from a taskbar
 // theme.
 
-use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Transform};
+use tiny_skia::{
+    Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
+};
 use tray_icon::Icon;
 
 const CANVAS: u32 = 64;
@@ -48,39 +50,46 @@ fn mascot_path() -> Path {
     for (x0, y0, x1, y1) in rects {
         add_rect(&mut pb, x0, y0, x1, y1);
     }
-    // Ear notches: evenodd fill makes these subtract from the ears band
-    // above rather than add to it, same as the source SVG.
-    pb.move_to(17.0, 28.0);
-    pb.line_to(17.0, 42.0);
-    pb.line_to(32.0, 35.0);
-    pb.close();
-    pb.move_to(83.0, 28.0);
-    pb.line_to(83.0, 42.0);
-    pb.line_to(68.0, 35.0);
-    pb.close();
+    // The source SVG (spec-fedora) cuts a triangular notch out of each side
+    // of the ears band here for a pointier "ear" silhouette. Dropped for
+    // the tray bitmap: at ~16px that transparent wedge (right next to the
+    // eyes) doesn't read as an ear, it reads as a hole torn in the face.
+    // The wider ears band alone still gives a slight flared-shoulder step.
     pb.finish().expect("mascot path is well-formed")
 }
 
-/// Solid black eyes, filled *on top of* the mascot silhouette rather than
-/// cut out of it -- a transparent cutout let the (dark) taskbar bleed
-/// through with an antialiasing halo that read as pale/white at tray size
-/// instead of a clean black dot. Small squares when open, thin bars when
-/// closed, centered in the head band.
-fn eyes_path(eyes_open: bool) -> Path {
-    // Sized well past what looks "right" at full-viewBox scale on purpose:
-    // at the ~16px Windows actually renders the tray icon at, anything
-    // subtler than this washes out into a brownish blur when the OS
-    // downsamples our 32x32 source (see icon.rs history / the "impossível
-    // enxergar" bug report that prompted this file).
+/// Eye vertical center: low enough in the head band (10..28) to read as a
+/// face rather than sitting up near the top edge, but clear of the ear
+/// notches which start at y=28.
+const EYE_CY: f32 = 24.0;
+
+/// Open eyes: two small solid black dots, filled *on top of* the mascot
+/// silhouette rather than cut out of it -- a transparent cutout let the
+/// (dark) taskbar bleed through with an antialiasing halo that read as
+/// pale/white at tray size instead of a clean black dot.
+fn eyes_open_path() -> Path {
     let mut pb = PathBuilder::new();
     for cx in [30.0, 70.0] {
-        let cy = 19.0;
-        if eyes_open {
-            add_rect(&mut pb, cx - 6.5, cy - 6.5, cx + 6.5, cy + 6.5);
-        } else {
-            add_rect(&mut pb, cx - 7.5, cy - 1.75, cx + 7.5, cy + 1.75);
-        }
+        add_rect(&mut pb, cx - 3.0, EYE_CY - 3.0, cx + 3.0, EYE_CY + 3.0);
     }
+    pb.finish().expect("eyes path is well-formed")
+}
+
+/// Closed eyes: a content/squinting "><" -- left eye a ">" chevron
+/// (pointing right, toward the nose), right eye a "<" (pointing left) --
+/// stroked rather than filled, so it reads as two thin V shapes instead of
+/// a flat closed-eyelid bar.
+fn eyes_closed_path() -> Path {
+    let mut pb = PathBuilder::new();
+    let (hw, hh) = (4.0, 4.0);
+    // Left eye: ">"
+    pb.move_to(30.0 - hw, EYE_CY - hh);
+    pb.line_to(30.0 + hw, EYE_CY);
+    pb.line_to(30.0 - hw, EYE_CY + hh);
+    // Right eye: "<"
+    pb.move_to(70.0 + hw, EYE_CY - hh);
+    pb.line_to(70.0 - hw, EYE_CY);
+    pb.line_to(70.0 + hw, EYE_CY + hh);
     pb.finish().expect("eyes path is well-formed")
 }
 
@@ -110,13 +119,29 @@ pub fn render_icon(eyes_open: bool) -> Icon {
         Transform::from_scale(SCALE, SCALE),
         None,
     );
-    pixmap.fill_path(
-        &eyes_path(eyes_open),
-        &solid_paint(eye_color()),
-        FillRule::EvenOdd,
-        Transform::from_scale(SCALE, SCALE),
-        None,
-    );
+    if eyes_open {
+        pixmap.fill_path(
+            &eyes_open_path(),
+            &solid_paint(eye_color()),
+            FillRule::EvenOdd,
+            Transform::from_scale(SCALE, SCALE),
+            None,
+        );
+    } else {
+        let stroke = Stroke {
+            width: 3.5,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Default::default()
+        };
+        pixmap.stroke_path(
+            &eyes_closed_path(),
+            &solid_paint(eye_color()),
+            &stroke,
+            Transform::from_scale(SCALE, SCALE),
+            None,
+        );
+    }
 
     Icon::from_rgba(pixmap.data().to_vec(), CANVAS, CANVAS).expect("valid icon buffer")
 }
