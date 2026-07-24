@@ -62,7 +62,7 @@ fn mascot_path() -> Path {
 /// reference art (Downloads/HBSjoHSaEAA44Dk.jpg -- the "Welcome, Claw'd"
 /// image): big bold squares taking up a real chunk of the head band
 /// (10..28), not small dots.
-const EYE_CY: f32 = 20.0;
+const EYE_CY: f32 = 21.5;
 const EYE_HALF: f32 = 6.5;
 
 /// Open eyes: two big solid black squares, filled *on top of* the mascot
