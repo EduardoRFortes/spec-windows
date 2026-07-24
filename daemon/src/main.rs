@@ -27,7 +27,10 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     TrayIcon, TrayIconBuilder,
 };
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::window::WindowId;
 use winrt_notification::{Duration as ToastDuration, Toast};
 
 mod icon;
@@ -304,6 +307,91 @@ fn tooltip_text(usage: &UsageSnapshot) -> String {
     )
 }
 
+/// Everything the tick loop touches. winit 0.30 deprecated the old
+/// closure-based `EventLoop::run` in favor of this handler trait run via
+/// `run_app` -- we don't actually care about individual winit events (no
+/// window of our own; the tray icon and its menu live outside winit's
+/// window system), we just need a steady wakeup to drain `daemon_rx` and
+/// the menu click channel, which `about_to_wait` gives us.
+struct App {
+    tray: TrayIcon,
+    quit_id: MenuId,
+    pending: HashMap<String, PendingRequest>,
+    usage: UsageSnapshot,
+    eyes_open: bool,
+    last_blink: Instant,
+    daemon_rx: mpsc::Receiver<DaemonEvent>,
+    menu_channel: &'static tray_icon::menu::MenuEventReceiver,
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
+
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, _event: WindowEvent) {}
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(200),
+        ));
+
+        let mut menu_dirty = false;
+        let mut icon_dirty = false;
+
+        while let Ok(ev) = self.daemon_rx.try_recv() {
+            match ev {
+                DaemonEvent::NewRequest(req) => {
+                    notify_new_request(&req.tool_name, &req.tool_input_preview);
+                    self.pending.insert(req.request_id.clone(), req);
+                    menu_dirty = true;
+                }
+                DaemonEvent::Expired(id) => {
+                    menu_dirty |= self.pending.remove(&id).is_some();
+                }
+                DaemonEvent::Usage(u) => {
+                    self.usage = UsageSnapshot {
+                        five_hour_pct: u.five_hour_pct,
+                        seven_day_pct: u.seven_day_pct,
+                    };
+                    menu_dirty = true;
+                    icon_dirty = true;
+                    self.tray.set_tooltip(Some(tooltip_text(&self.usage))).ok();
+                }
+            }
+        }
+
+        if let Ok(event) = self.menu_channel.try_recv() {
+            let id = event.id.0.as_str();
+            if event.id == self.quit_id {
+                event_loop.exit();
+            } else if let Some(request_id) = id.strip_prefix("allow:") {
+                if let Some(req) = self.pending.remove(request_id) {
+                    let _ = req.reply.send(("allow".to_string(), None));
+                    menu_dirty = true;
+                }
+            } else if let Some(request_id) = id.strip_prefix("deny:") {
+                if let Some(req) = self.pending.remove(request_id) {
+                    let _ = req.reply.send(("deny".to_string(), None));
+                    menu_dirty = true;
+                }
+            }
+        }
+
+        if menu_dirty {
+            rebuild_menu(&self.tray, &self.quit_id, &self.pending, &self.usage);
+        }
+
+        if self.last_blink.elapsed() >= IDLE_BLINK_INTERVAL {
+            self.eyes_open = !self.eyes_open;
+            self.last_blink = Instant::now();
+            icon_dirty = true;
+        }
+
+        if icon_dirty {
+            self.tray.set_icon(Some(render_icon(self.eyes_open))).ok();
+        }
+    }
+}
+
 fn main() {
     eprintln!("[specd] starting, pid={}", std::process::id());
     let event_loop = EventLoop::new().expect("event loop");
@@ -340,76 +428,19 @@ fn main() {
     let (daemon_tx, daemon_rx) = mpsc::channel::<DaemonEvent>();
     spawn_pipe_listener(daemon_tx);
 
-    let menu_channel = MenuEvent::receiver();
-    let mut pending: HashMap<String, PendingRequest> = HashMap::new();
-    let mut usage = UsageSnapshot {
-        five_hour_pct: None,
-        seven_day_pct: None,
+    let mut app = App {
+        tray,
+        quit_id,
+        pending: HashMap::new(),
+        usage: UsageSnapshot {
+            five_hour_pct: None,
+            seven_day_pct: None,
+        },
+        eyes_open: true,
+        last_blink: Instant::now(),
+        daemon_rx,
+        menu_channel: MenuEvent::receiver(),
     };
-    let mut eyes_open = true;
-    let mut last_blink = Instant::now();
 
-    event_loop
-        .run(move |_event, elwt| {
-            elwt.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(200),
-            ));
-
-            let mut menu_dirty = false;
-            let mut icon_dirty = false;
-
-            while let Ok(ev) = daemon_rx.try_recv() {
-                match ev {
-                    DaemonEvent::NewRequest(req) => {
-                        notify_new_request(&req.tool_name, &req.tool_input_preview);
-                        pending.insert(req.request_id.clone(), req);
-                        menu_dirty = true;
-                    }
-                    DaemonEvent::Expired(id) => {
-                        menu_dirty |= pending.remove(&id).is_some();
-                    }
-                    DaemonEvent::Usage(u) => {
-                        usage = UsageSnapshot {
-                            five_hour_pct: u.five_hour_pct,
-                            seven_day_pct: u.seven_day_pct,
-                        };
-                        menu_dirty = true;
-                        icon_dirty = true;
-                        tray.set_tooltip(Some(tooltip_text(&usage))).ok();
-                    }
-                }
-            }
-
-            if let Ok(event) = menu_channel.try_recv() {
-                let id = event.id.0.as_str();
-                if event.id == quit_id {
-                    elwt.exit();
-                } else if let Some(request_id) = id.strip_prefix("allow:") {
-                    if let Some(req) = pending.remove(request_id) {
-                        let _ = req.reply.send(("allow".to_string(), None));
-                        menu_dirty = true;
-                    }
-                } else if let Some(request_id) = id.strip_prefix("deny:") {
-                    if let Some(req) = pending.remove(request_id) {
-                        let _ = req.reply.send(("deny".to_string(), None));
-                        menu_dirty = true;
-                    }
-                }
-            }
-
-            if menu_dirty {
-                rebuild_menu(&tray, &quit_id, &pending, &usage);
-            }
-
-            if last_blink.elapsed() >= IDLE_BLINK_INTERVAL {
-                eyes_open = !eyes_open;
-                last_blink = Instant::now();
-                icon_dirty = true;
-            }
-
-            if icon_dirty {
-                tray.set_icon(Some(render_icon(eyes_open))).ok();
-            }
-        })
-        .expect("event loop run");
+    event_loop.run_app(&mut app).expect("event loop run");
 }
