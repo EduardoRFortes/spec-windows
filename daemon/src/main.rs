@@ -32,8 +32,31 @@ use winrt_notification::{Duration as ToastDuration, Toast};
 
 mod icon;
 mod tray_promote;
-use icon::{render_icon, UsageSnapshot};
+use icon::render_icon;
 use tray_promote::promote_tray_icon;
+
+pub struct UsageSnapshot {
+    pub five_hour_pct: Option<f64>,
+    pub seven_day_pct: Option<f64>,
+}
+
+/// Block-character progress bar (e.g. "██████░░░░") -- the tray icon itself
+/// is rendered at ~16px by Windows, too small to show a readable bar (see
+/// icon.rs), so usage lives here instead: the right-click menu header and
+/// the hover tooltip, both plain text but with actual room for a bar +
+/// percentage.
+fn bar(pct: f64, width: usize) -> String {
+    let filled = ((pct.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(width - filled))
+}
+
+fn usage_line(label: &str, pct: Option<f64>) -> String {
+    match pct {
+        Some(p) => format!("{label} {} {p:.0}%", bar(p, 10)),
+        None => format!("{label} ?"),
+    }
+}
 
 /// How often the daemon safety-net gives up on an unanswered request if
 /// nobody clicks Allow/Deny — matches the 600s ceiling from PROTOCOL.md.
@@ -218,16 +241,16 @@ fn rebuild_menu(
     let menu = Menu::new();
 
     if usage.five_hour_pct.is_some() || usage.seven_day_pct.is_some() {
-        let fmt = |pct: Option<f64>| {
-            pct.map(|p| format!("{p:.0}%"))
-                .unwrap_or_else(|| "?".to_string())
-        };
-        let label = format!(
-            "Uso — sessão {} · semana {}",
-            fmt(usage.five_hour_pct),
-            fmt(usage.seven_day_pct)
-        );
-        let _ = menu.append(&MenuItem::new(label, false, None));
+        let _ = menu.append(&MenuItem::new(
+            usage_line("Sessão", usage.five_hour_pct),
+            false,
+            None,
+        ));
+        let _ = menu.append(&MenuItem::new(
+            usage_line("Semana", usage.seven_day_pct),
+            false,
+            None,
+        ));
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
@@ -262,10 +285,14 @@ fn rebuild_menu(
 }
 
 fn tooltip_text(usage: &UsageSnapshot) -> String {
-    match (usage.five_hour_pct, usage.seven_day_pct) {
-        (Some(fh), Some(wk)) => format!("spec-windows — sessão {fh:.0}% · semana {wk:.0}%"),
-        _ => "spec-windows (protótipo)".to_string(),
+    if usage.five_hour_pct.is_none() && usage.seven_day_pct.is_none() {
+        return "spec-windows".to_string();
     }
+    format!(
+        "{}\n{}",
+        usage_line("Sessão", usage.five_hour_pct),
+        usage_line("Semana", usage.seven_day_pct)
+    )
 }
 
 fn main() {
@@ -285,7 +312,7 @@ fn main() {
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(initial_menu))
         .with_tooltip(tooltip_text(&no_usage))
-        .with_icon(render_icon(true, &no_usage))
+        .with_icon(render_icon(true))
         .build()
         .expect("tray icon");
 
@@ -372,7 +399,7 @@ fn main() {
             }
 
             if icon_dirty {
-                tray.set_icon(Some(render_icon(eyes_open, &usage))).ok();
+                tray.set_icon(Some(render_icon(eyes_open))).ok();
             }
         })
         .expect("event loop run");
