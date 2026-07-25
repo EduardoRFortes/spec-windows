@@ -16,7 +16,8 @@
 #![windows_subsystem = "windows"]
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -244,6 +245,88 @@ fn spawn_pipe_listener(tx: mpsc::Sender<DaemonEvent>) {
     });
 }
 
+/// Default `SPEC_HTTP_PORT` — only reachable from outside this machine via
+/// an explicit SSH `RemoteForward`, never exposed directly (bound to
+/// loopback below), so there's no real collision/security surface to pick
+/// around.
+const DEFAULT_HTTP_PORT: u16 = 27182;
+
+/// Reads exactly `Content-Length` bytes of body after the headers. Not a
+/// real HTTP parser — this only ever needs to serve one thing (`POST
+/// /usage`, see PROTOCOL.md), so anything past "find Content-Length, read
+/// that many bytes" is unneeded surface.
+fn read_http_body(stream: &TcpStream) -> Option<String> {
+    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut header_line = String::new();
+        if reader.read_line(&mut header_line).ok()? == 0 {
+            return None;
+        }
+        let header_line = header_line.trim_end();
+        if header_line.is_empty() {
+            break;
+        }
+        if let Some(value) = header_line
+            .to_ascii_lowercase()
+            .strip_prefix("content-length:")
+        {
+            content_length = value.trim().parse().ok();
+        }
+    }
+    let mut body = vec![0u8; content_length?];
+    reader.read_exact(&mut body).ok()?;
+    String::from_utf8(body).ok()
+}
+
+fn handle_http_connection(stream: TcpStream, tx: mpsc::Sender<DaemonEvent>) {
+    let Some(body) = read_http_body(&stream) else {
+        eprintln!("[specd] http: bad request, dropping");
+        return;
+    };
+    handle_usage(&body, tx);
+    let mut stream = stream;
+    let _ =
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+}
+
+/// TCP counterpart to the named pipe, for Claude Code sessions that never
+/// touch this Windows machine directly -- a VM/container reached over SSH
+/// (including VS Code Remote - SSH) runs `spec-statusline-remote.py`
+/// instead of `spec-statusline.exe`, and POSTs usage JSON here through an
+/// SSH `RemoteForward` tunnel (`RemoteForward 27182 localhost:27182`) set up
+/// on the Windows side. Bound to loopback only: the tunnel is what makes
+/// this reachable from the VM at all, not an open port. Same fail-open rule
+/// as the pipe path — if the tunnel isn't up or this isn't running, the
+/// remote hook's POST just fails silently and Claude Code is unaffected.
+fn spawn_http_listener(tx: mpsc::Sender<DaemonEvent>) {
+    thread::spawn(move || {
+        let port: u16 = std::env::var("SPEC_HTTP_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_HTTP_PORT);
+        let listener = match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[specd] failed to bind http 127.0.0.1:{port}: {e}");
+                return;
+            }
+        };
+        eprintln!("[specd] listening on http 127.0.0.1:{port}");
+        for conn in listener.incoming() {
+            let conn = match conn {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[specd] http accept error: {e}");
+                    continue;
+                }
+            };
+            let tx = tx.clone();
+            thread::spawn(move || handle_http_connection(conn, tx));
+        }
+    });
+}
+
 fn rebuild_menu(
     tray: &TrayIcon,
     quit_id: &MenuId,
@@ -426,7 +509,8 @@ fn main() {
     });
 
     let (daemon_tx, daemon_rx) = mpsc::channel::<DaemonEvent>();
-    spawn_pipe_listener(daemon_tx);
+    spawn_pipe_listener(daemon_tx.clone());
+    spawn_http_listener(daemon_tx);
 
     let mut app = App {
         tray,

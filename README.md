@@ -57,6 +57,16 @@ boot.
   for Visual Studio* se não estiverem presentes.
 - `git`.
 
+> **Atenção, máquinas corporativas:** as *Build Tools for Visual Studio*
+> (workload "Desktop development with C++", que traz o linker `link.exe`
+> usado pelo target MSVC) costumam pedir **privilégio de administrador**
+> para instalar, mesmo quando o resto do processo (`rustup`, `cargo build`,
+> o `install.ps1`) não pede. Se elas já estiverem instaladas na máquina,
+> nada disso é necessário — mas em uma instalação limpa, sem conta admin
+> local, o `rustup-init` vai travar nesse passo. Peça pro time de TI
+> instalar as Build Tools (ou o Visual Studio completo) antes de tentar
+> compilar.
+
 ### Passo a passo
 
 1. Clone o repositório e entre na pasta:
@@ -99,6 +109,51 @@ qualquer comando que normalmente pediria confirmação (ex.: `rm` em algum
 arquivo de teste) — deve chegar uma notificação e um item Permitir/Negar
 no menu da bandeja em vez do prompt de terminal.
 
+### Sessões remotas (SSH / VS Code Remote)
+
+Por padrão o Spec só enxerga o Claude Code rodando localmente no Windows —
+`spec-statusline.exe` fala com o `specd` local por named pipe. Se você roda
+o Claude Code dentro de uma VM ou container acessado por SSH (incluindo
+VS Code Remote - SSH), esse processo é Linux e nunca chama um binário
+Windows, então a bandeja fica presa nos últimos dados da sessão local.
+
+Para cobrir esse caso, o `specd` também escuta `POST /usage` em
+`127.0.0.1:27182` (ver [PROTOCOL.md](./PROTOCOL.md)). Configuração:
+
+1. Copie o hook Python (sem dependências, só precisa de `python3` na VM)
+   pra VM:
+   ```powershell
+   scp hook\spec-statusline-remote.py usuario@vm:~/
+   ```
+2. Na VM, registre-o como `statusLine` no `~/.claude/settings.json`:
+   ```bash
+   chmod +x ~/spec-statusline-remote.py
+   python3 - << 'EOF'
+   import json, os
+   path = os.path.expanduser("~/.claude/settings.json")
+   cfg = json.load(open(path)) if os.path.exists(path) else {}
+   cfg["statusLine"] = {
+       "type": "command",
+       "command": f"python3 {os.path.expanduser('~/spec-statusline-remote.py')}",
+   }
+   json.dump(cfg, open(path, "w"), indent=2)
+   EOF
+   ```
+3. No Windows, adicione ao `~/.ssh/config` um `RemoteForward` pra sessão
+   sempre levar a porta de volta pro `specd` local:
+   ```
+   Host vm-ou-alias
+       RemoteForward 27182 localhost:27182
+   ```
+   (ou, pra ativar só quando precisar, sem mexer no config:
+   `ssh -R 27182:localhost:27182 usuario@vm`.)
+
+Com o túnel ativo, qualquer sessão de Claude Code dentro dessa VM atualiza a
+mesma bandeja do Windows. Sem o túnel (ou com o `specd` fechado), o hook
+remoto falha em silêncio — mesma regra de fail-open do resto do projeto, só
+que aqui não há decisão nenhuma pra travar, então "falhar" só significa que
+a bandeja não atualiza.
+
 ### Desinstalar
 
 ```powershell
@@ -115,7 +170,10 @@ comparar).
 ## Componentes
 
 - `hook/` — `spec-hook` (Rust), registrado como hook `PreToolUse`; e
-  `spec-statusline`, registrado como `statusLine`.
+  `spec-statusline`, registrado como `statusLine`. Também
+  `spec-statusline-remote.py`, o equivalente do `spec-statusline` pra
+  sessões de Claude Code rodando em VMs/containers via SSH (ver
+  [Sessões remotas](#sessões-remotas-ssh--vs-code-remote) acima).
 - `daemon/` — `specd` (Rust), bandeja + notificações + estado dos pedidos
   pendentes + Tarefa Agendada para autostart.
 - `install/` — `install.ps1` (fluxo completo) e `merge_settings.ps1`
