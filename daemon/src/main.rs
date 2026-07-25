@@ -39,9 +39,39 @@ mod tray_promote;
 use icon::render_icon;
 use tray_promote::promote_tray_icon;
 
+#[derive(Default)]
 pub struct UsageSnapshot {
     pub five_hour_pct: Option<f64>,
+    pub five_hour_resets_at: Option<i64>,
     pub seven_day_pct: Option<f64>,
+    pub seven_day_resets_at: Option<i64>,
+}
+
+/// The 5h/7d quota is per-*account*, not per-session -- a local Windows
+/// session and a remote VM session (see spawn_http_listener) both draw from
+/// the same quota, but each only reports the number it personally last saw
+/// in an API response. Without this, whichever session happens to talk to
+/// specd last wins, even if its cached number is older/lower than what's
+/// already showing -- e.g. the VM reports 51%, then ten minutes later a
+/// local prompt reports the 49% it had cached from before the VM's last
+/// update, and the tray would wrongly drop back to 49%.
+///
+/// Usage only goes up within a window (it can't decrease until the window
+/// rolls over), so: accept a lower number only when `resets_at` actually
+/// changed (a genuinely new window); otherwise keep the higher of the two.
+fn merge_usage_field(
+    current_pct: &mut Option<f64>,
+    current_resets_at: &mut Option<i64>,
+    new_pct: Option<f64>,
+    new_resets_at: Option<i64>,
+) {
+    let Some(new_pct) = new_pct else { return };
+    let new_window = *current_resets_at != new_resets_at;
+    let is_higher = current_pct.is_none_or(|p| new_pct >= p);
+    if new_window || is_higher {
+        *current_pct = Some(new_pct);
+        *current_resets_at = new_resets_at;
+    }
 }
 
 /// Block-character progress bar (e.g. "██████░░░░") -- the tray icon itself
@@ -431,10 +461,18 @@ impl ApplicationHandler for App {
                     menu_dirty |= self.pending.remove(&id).is_some();
                 }
                 DaemonEvent::Usage(u) => {
-                    self.usage = UsageSnapshot {
-                        five_hour_pct: u.five_hour_pct,
-                        seven_day_pct: u.seven_day_pct,
-                    };
+                    merge_usage_field(
+                        &mut self.usage.five_hour_pct,
+                        &mut self.usage.five_hour_resets_at,
+                        u.five_hour_pct,
+                        u.five_hour_resets_at,
+                    );
+                    merge_usage_field(
+                        &mut self.usage.seven_day_pct,
+                        &mut self.usage.seven_day_resets_at,
+                        u.seven_day_pct,
+                        u.seven_day_resets_at,
+                    );
                     menu_dirty = true;
                     icon_dirty = true;
                     self.tray.set_tooltip(Some(tooltip_text(&self.usage))).ok();
@@ -485,10 +523,7 @@ fn main() {
         .append(&MenuItem::with_id(quit_id.clone(), "Sair", true, None))
         .expect("append quit item");
 
-    let no_usage = UsageSnapshot {
-        five_hour_pct: None,
-        seven_day_pct: None,
-    };
+    let no_usage = UsageSnapshot::default();
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(initial_menu))
         .with_tooltip(tooltip_text(&no_usage))
@@ -516,10 +551,7 @@ fn main() {
         tray,
         quit_id,
         pending: HashMap::new(),
-        usage: UsageSnapshot {
-            five_hour_pct: None,
-            seven_day_pct: None,
-        },
+        usage: UsageSnapshot::default(),
         eyes_open: true,
         last_blink: Instant::now(),
         daemon_rx,
