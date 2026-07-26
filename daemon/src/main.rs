@@ -513,23 +513,67 @@ impl ApplicationHandler for App {
     }
 }
 
+// At logon, the "at log on" scheduled-task trigger fires specd.exe at
+// essentially the same instant explorer.exe (owner of the tray/shell) starts
+// -- on a cold boot explorer isn't always ready yet, and EventLoop::new()/
+// TrayIconBuilder::build() fail outright instead of blocking. That used to
+// be a bare .expect(), which panics (exit code 101) and burns through the
+// task's 3 restart attempts within the first few seconds, before explorer
+// has caught up -- leaving the tray simply absent for the rest of the
+// session. Retry with backoff instead of giving up on the first try.
+const STARTUP_RETRY_ATTEMPTS: u32 = 20;
+const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+fn create_event_loop_with_retry() -> EventLoop<()> {
+    for attempt in 1..=STARTUP_RETRY_ATTEMPTS {
+        match EventLoop::new() {
+            Ok(event_loop) => return event_loop,
+            Err(e) => {
+                eprintln!(
+                    "[specd] event loop attempt {attempt}/{STARTUP_RETRY_ATTEMPTS} failed: {e:?}, retrying"
+                );
+                thread::sleep(STARTUP_RETRY_DELAY);
+            }
+        }
+    }
+    panic!("event loop: giving up after {STARTUP_RETRY_ATTEMPTS} retries");
+}
+
+fn create_tray_with_retry(quit_id: &MenuId) -> TrayIcon {
+    let no_usage = UsageSnapshot::default();
+    for attempt in 1..=STARTUP_RETRY_ATTEMPTS {
+        let initial_menu = Menu::new();
+        if let Err(e) = initial_menu.append(&MenuItem::with_id(quit_id.clone(), "Sair", true, None)) {
+            eprintln!(
+                "[specd] append quit item attempt {attempt}/{STARTUP_RETRY_ATTEMPTS} failed: {e:?}, retrying"
+            );
+            thread::sleep(STARTUP_RETRY_DELAY);
+            continue;
+        }
+        match TrayIconBuilder::new()
+            .with_menu(Box::new(initial_menu))
+            .with_tooltip(tooltip_text(&no_usage))
+            .with_icon(render_icon(true))
+            .build()
+        {
+            Ok(tray) => return tray,
+            Err(e) => {
+                eprintln!(
+                    "[specd] tray build attempt {attempt}/{STARTUP_RETRY_ATTEMPTS} failed: {e:?}, retrying"
+                );
+                thread::sleep(STARTUP_RETRY_DELAY);
+            }
+        }
+    }
+    panic!("tray icon: giving up after {STARTUP_RETRY_ATTEMPTS} retries");
+}
+
 fn main() {
     eprintln!("[specd] starting, pid={}", std::process::id());
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = create_event_loop_with_retry();
 
     let quit_id = MenuId::new("quit");
-    let initial_menu = Menu::new();
-    initial_menu
-        .append(&MenuItem::with_id(quit_id.clone(), "Sair", true, None))
-        .expect("append quit item");
-
-    let no_usage = UsageSnapshot::default();
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(initial_menu))
-        .with_tooltip(tooltip_text(&no_usage))
-        .with_icon(render_icon(true))
-        .build()
-        .expect("tray icon");
+    let tray = create_tray_with_retry(&quit_id);
 
     // Explorer only creates our NotifyIconSettings entry after the first
     // Shell_NotifyIcon call above, and that can lag a little — retry for a
