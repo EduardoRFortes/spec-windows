@@ -286,7 +286,7 @@ const DEFAULT_HTTP_PORT: u16 = 27182;
 /// /usage`, see PROTOCOL.md), so anything past "find Content-Length, read
 /// that many bytes" is unneeded surface.
 fn read_http_body(stream: &TcpStream) -> Option<String> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let mut reader = BufReader::new(stream);
     let mut content_length: Option<usize> = None;
     loop {
         let mut header_line = String::new();
@@ -309,13 +309,15 @@ fn read_http_body(stream: &TcpStream) -> Option<String> {
     String::from_utf8(body).ok()
 }
 
-fn handle_http_connection(stream: TcpStream, tx: mpsc::Sender<DaemonEvent>) {
-    let Some(body) = read_http_body(&stream) else {
-        eprintln!("[specd] http: bad request, dropping");
-        return;
+fn handle_http_connection(mut stream: TcpStream, tx: mpsc::Sender<DaemonEvent>) {
+    let body = {
+        let Some(b) = read_http_body(&stream) else {
+            eprintln!("[specd] http: bad request, dropping");
+            return;
+        };
+        b
     };
     handle_usage(&body, tx);
-    let mut stream = stream;
     let _ =
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
 }
