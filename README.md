@@ -139,14 +139,12 @@ Para cobrir esse caso, o `specd` também escuta `POST /usage` em
    json.dump(cfg, open(path, "w"), indent=2)
    EOF
    ```
-3. No Windows, adicione ao `~/.ssh/config` um `RemoteForward` pra sessão
-   sempre levar a porta de volta pro `specd` local:
-   ```
-   Host vm-ou-alias
-       RemoteForward 27283 127.0.0.1:27182
-   ```
-   (ou, pra ativar só quando precisar, sem mexer no config:
-   `ssh -R 27283:127.0.0.1:27182 usuario@vm`.)
+3. No Windows, mantenha um túnel `RemoteForward` sempre ativo levando a
+   porta de volta pro `specd` local. **Use só um dos dois métodos abaixo
+   por VM** — rodar os dois ao mesmo tempo pro mesmo host faz as duas
+   conexões brigarem pelo bind da porta remota 27283 (a segunda a
+   conectar falha o forward; com `ExitOnForwardFailure=yes` ela cai num
+   loop de crash-retry a cada 10s enquanto a outra segurar a porta).
 
    > **Por que 27283 e não 27182?**  
    > O VS Code Remote - SSH intercepta automaticamente qualquer
@@ -162,18 +160,45 @@ Para cobrir esse caso, o `specd` também escuta `POST /usage` em
    > dados que nunca chegam. Com `127.0.0.1` a conexão vai direto para o
    > IPv4 onde o `specd` está escutando.
 
-   Se estiver usando VS Code Remote - SSH, crie também uma Tarefa Agendada
-   para manter o túnel ativo em segundo plano (o VS Code abre o próprio
-   túnel para 27182, mas não para 27283):
+   **Método recomendado — Tarefa Agendada (`SpecSSHTunnel`):** uma
+   conexão SSH independente, dedicada só ao túnel, que sobe no logon e se
+   reconecta sozinha. Funciona tanto pra sessões manuais (`ssh vm-ou-alias`
+   num terminal) quanto pro VS Code Remote - SSH, já que não depende de
+   como você abre a sessão de trabalho na VM — é sempre esse processo à
+   parte que segura a porta 27283:
    ```powershell
-   $sshArgs = '-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -i "$env:USERPROFILE\.ssh\sua-chave" -R 27283:127.0.0.1:27182 usuario@vm'
+   $sshArgs = @(
+       '-N', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=10',
+       '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
+       '-i', "$env:USERPROFILE\.ssh\sua-chave",
+       '-R', '27283:127.0.0.1:27182', 'usuario@vm'
+   )
+   $argLiteral = ($sshArgs | ForEach-Object { "'$($_ -replace "'", "''")'" }) -join ','
+   $script = @"
+   while (`$true) {
+       `$p = Start-Process ssh -ArgumentList @($argLiteral) -PassThru -WindowStyle Hidden
+       Wait-Process -Id `$p.Id -Timeout 300 -ErrorAction SilentlyContinue
+       if (-not `$p.HasExited) { Stop-Process -Id `$p.Id -Force }
+       Start-Sleep -Seconds 10
+   }
+   "@
+   $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
    $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
-       -Argument "-NonInteractive -WindowStyle Hidden -Command `"while (`$true) { & ssh $sshArgs; Start-Sleep -Seconds 10 }`""
+       -Argument "-NonInteractive -WindowStyle Hidden -EncodedCommand $encoded"
    $trigger = New-ScheduledTaskTrigger -AtLogOn
    Register-ScheduledTask -TaskName "SpecSSHTunnel" -Action $action -Trigger $trigger -RunLevel Limited -Force
    Start-ScheduledTask "SpecSSHTunnel"
    ```
 
+   > **Por que `-EncodedCommand` (Base64) em vez de montar a string do
+   > `-Command` na mão?** O caminho da chave SSH entre aspas
+   > (`-i "...\sua-chave"`) fica aninhado dentro do `-Command "..."` que o
+   > Task Scheduler também delimita com aspas duplas — aspas duplas dentro
+   > de aspas duplas quebram o parsing da linha de comando do Windows assim
+   > que a primeira aspa embutida aparece. `-EncodedCommand` evita essa
+   > classe inteira de problema: o script vai como Base64, sem aspas
+   > nenhuma pro Windows atropelar.
+   >
    > **Por que o loop PowerShell em vez de chamar `ssh` diretamente?**  
    > O Windows Task Scheduler só reinicia uma task quando ela termina com
    > código de saída ≠ 0 (falha). Quando o PC trava, dorme ou a rede cai
@@ -181,6 +206,28 @@ Para cobrir esse caso, o `specd` também escuta `POST /usage` em
    > task nunca é relançada. Embrulhar o `ssh` num loop `while ($true)`
    > garante que ele seja relançado após 10 segundos independente do motivo
    > da queda — freeze, sleep, reconexão de rede, qualquer coisa.
+   >
+   > **Por que matar o processo a cada 5 minutos (`Wait-Process -Timeout
+   > 300` + `Stop-Process`) em vez de só esperar ele cair sozinho?**  
+   > Sleep/hibernate do Windows costuma deixar a conexão TCP num estado
+   > "zumbi" — o socket parece vivo, mas os pacotes somem num buraco negro.
+   > Os keepalives do SSH (`ServerAliveInterval`/`CountMax`) dependem de
+   > resposta chegando por essa mesma conexão morta, então nesse cenário
+   > eles também ficam presos e o processo nunca percebe que devia cair.
+   > Reciclar à força a cada 5 minutos, independente do processo parecer
+   > vivo ou não, garante um teto de tempo pra recuperação nesse caso —
+   > o custo é só ~1-2s de porta fechada a cada ciclo, o que não importa
+   > pra um ping periódico de uso.
+
+   **Alternativa — só no `~/.ssh/config`:** se preferir não ter uma task
+   rodando em segundo plano e só ativar o túnel enquanto uma sessão manual
+   estiver aberta (não cobre VS Code Remote - SSH, que não aplica esse
+   `RemoteForward`):
+   ```
+   Host vm-ou-alias
+       RemoteForward 27283 127.0.0.1:27182
+   ```
+   (ou pontual, sem mexer no config: `ssh -R 27283:127.0.0.1:27182 usuario@vm`.)
 
 Com o túnel ativo, qualquer sessão de Claude Code dentro dessa VM atualiza a
 mesma bandeja do Windows. Sem o túnel (ou com o `specd` fechado), o hook
@@ -192,8 +239,14 @@ a bandeja não atualiza.
 
 ```powershell
 Unregister-ScheduledTask -TaskName "SpecWindowsTray" -Confirm:$false
+Unregister-ScheduledTask -TaskName "SpecSSHTunnel" -Confirm:$false -ErrorAction SilentlyContinue
 Stop-Process -Name specd -Force
 ```
+
+A segunda linha só se aplica se você configurou o túnel de VM (seção
+[Sessões remotas](#sessões-remotas-ssh--vs-code-remote) acima) — daí o
+`-ErrorAction SilentlyContinue`, pra não quebrar em quem nunca criou essa
+task.
 
 E remova manualmente as entradas `hooks.PreToolUse` / `statusLine` que
 apontam para `spec-hook.exe` / `spec-statusline.exe` do seu
