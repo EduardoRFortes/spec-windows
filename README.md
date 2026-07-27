@@ -166,12 +166,21 @@ Para cobrir esse caso, o `specd` também escuta `POST /usage` em
    para manter o túnel ativo em segundo plano (o VS Code abre o próprio
    túnel para 27182, mas não para 27283):
    ```powershell
-   $action  = New-ScheduledTaskAction -Execute "ssh" `
-       -Argument '-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -i "$env:USERPROFILE\.ssh\sua-chave" -R 27283:127.0.0.1:27182 usuario@vm'
+   $sshArgs = '-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -i "$env:USERPROFILE\.ssh\sua-chave" -R 27283:127.0.0.1:27182 usuario@vm'
+   $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+       -Argument "-NonInteractive -WindowStyle Hidden -Command `"while (`$true) { & ssh $sshArgs; Start-Sleep -Seconds 10 }`""
    $trigger = New-ScheduledTaskTrigger -AtLogOn
    Register-ScheduledTask -TaskName "SpecSSHTunnel" -Action $action -Trigger $trigger -RunLevel Limited -Force
    Start-ScheduledTask "SpecSSHTunnel"
    ```
+
+   > **Por que o loop PowerShell em vez de chamar `ssh` diretamente?**  
+   > O Windows Task Scheduler só reinicia uma task quando ela termina com
+   > código de saída ≠ 0 (falha). Quando o PC trava, dorme ou a rede cai
+   > abruptamente, o processo SSH pode morrer com código 0 ("sucesso"), e a
+   > task nunca é relançada. Embrulhar o `ssh` num loop `while ($true)`
+   > garante que ele seja relançado após 10 segundos independente do motivo
+   > da queda — freeze, sleep, reconexão de rede, qualquer coisa.
 
 Com o túnel ativo, qualquer sessão de Claude Code dentro dessa VM atualiza a
 mesma bandeja do Windows. Sem o túnel (ou com o `specd` fechado), o hook
