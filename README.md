@@ -143,10 +143,44 @@ Para cobrir esse caso, o `specd` também escuta `POST /usage` em
    sempre levar a porta de volta pro `specd` local:
    ```
    Host vm-ou-alias
-       RemoteForward 27182 localhost:27182
+       RemoteForward 27283 127.0.0.1:27182
    ```
    (ou, pra ativar só quando precisar, sem mexer no config:
-   `ssh -R 27182:localhost:27182 usuario@vm`.)
+   `ssh -R 27283:127.0.0.1:27182 usuario@vm`.)
+
+   > **Por que 27283 e não 27182?**  
+   > O VS Code Remote - SSH intercepta automaticamente qualquer
+   > `RemoteForward` para a porta 27182 e redireciona o tráfego para uma
+   > porta interna própria (27183) em vez de deixar chegar no `specd`. Usar
+   > 27283 (ou qualquer outra porta livre acima de 27200) evita essa
+   > interceptação.
+   >
+   > **Por que `127.0.0.1` e não `localhost`?**  
+   > O cliente SSH do Windows resolve `localhost` para `[::1]` (IPv6) antes
+   > de tentar `127.0.0.1` (IPv4), mas o `specd` escuta apenas em IPv4.
+   > Com `localhost`, a conexão falha silenciosamente — o hook remoto posta
+   > dados que nunca chegam. Com `127.0.0.1` a conexão vai direto para o
+   > IPv4 onde o `specd` está escutando.
+
+   Se estiver usando VS Code Remote - SSH, crie também uma Tarefa Agendada
+   para manter o túnel ativo em segundo plano (o VS Code abre o próprio
+   túnel para 27182, mas não para 27283):
+   ```powershell
+   $sshArgs = '-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -i "$env:USERPROFILE\.ssh\sua-chave" -R 27283:127.0.0.1:27182 usuario@vm'
+   $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+       -Argument "-NonInteractive -WindowStyle Hidden -Command `"while (`$true) { & ssh $sshArgs; Start-Sleep -Seconds 10 }`""
+   $trigger = New-ScheduledTaskTrigger -AtLogOn
+   Register-ScheduledTask -TaskName "SpecSSHTunnel" -Action $action -Trigger $trigger -RunLevel Limited -Force
+   Start-ScheduledTask "SpecSSHTunnel"
+   ```
+
+   > **Por que o loop PowerShell em vez de chamar `ssh` diretamente?**  
+   > O Windows Task Scheduler só reinicia uma task quando ela termina com
+   > código de saída ≠ 0 (falha). Quando o PC trava, dorme ou a rede cai
+   > abruptamente, o processo SSH pode morrer com código 0 ("sucesso"), e a
+   > task nunca é relançada. Embrulhar o `ssh` num loop `while ($true)`
+   > garante que ele seja relançado após 10 segundos independente do motivo
+   > da queda — freeze, sleep, reconexão de rede, qualquer coisa.
 
 Com o túnel ativo, qualquer sessão de Claude Code dentro dessa VM atualiza a
 mesma bandeja do Windows. Sem o túnel (ou com o `specd` fechado), o hook

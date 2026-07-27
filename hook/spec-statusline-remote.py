@@ -21,7 +21,7 @@ import json
 import sys
 
 DAEMON_HOST = "127.0.0.1"
-DAEMON_PORT = 27182
+DAEMON_PORT = 27283
 DAEMON_TIMEOUT = 0.3  # seconds -- same order of magnitude as spec-hook's own handshake timeout
 
 
