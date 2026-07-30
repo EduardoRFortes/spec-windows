@@ -76,6 +76,14 @@ def main():
     line = render_status_line(five_hour, seven_day)
     if line:
         print(line)
+        # Explicit flush: stdout is a pipe here (not a tty), so Python
+        # fully-buffers it by default. Claude Code reaps this process as
+        # soon as it has the status line text -- without the flush, the
+        # unbuffered print never reaches Claude Code in time and the
+        # process gets killed before forward_to_daemon() below ever runs.
+        # (Rust's println! doesn't need this: it line-buffers regardless
+        # of tty, which is why spec-statusline.exe never hit this.)
+        sys.stdout.flush()
 
     forward_to_daemon(five_hour, seven_day)
 
