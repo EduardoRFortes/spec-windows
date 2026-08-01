@@ -17,3 +17,12 @@ winreg = "0.52"
 protocol = { path = "../protocol" }
 winrt-notification = "0.5"
 tiny-skia = "0.11"
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_Security",
+]

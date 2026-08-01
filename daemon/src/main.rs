@@ -33,6 +33,9 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 use winrt_notification::{Duration as ToastDuration, Toast};
+use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
+use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
 
 mod icon;
 mod tray_promote;
@@ -422,6 +425,31 @@ fn tooltip_text(usage: &UsageSnapshot) -> String {
     )
 }
 
+/// PID currently owning Explorer's tray window ("Shell_TrayWnd"), or `None`
+/// if Explorer isn't up. `tray-icon` already re-registers our icon when it
+/// sees the `TaskbarCreated` broadcast Explorer sends on restart, but that
+/// relies on our message pump getting scheduled promptly enough to receive
+/// it -- not guaranteed after this process has sat idle for hours (the
+/// `tray-icon` source itself has a resigned comment about window/taskbar
+/// quirks "after several hours have passed": platform_impl/windows/mod.rs).
+/// Polling the owning PID directly catches an Explorer restart even if that
+/// broadcast was missed.
+fn explorer_pid() -> Option<u32> {
+    let class_name: Vec<u16> = "Shell_TrayWnd\0".encode_utf16().collect();
+    unsafe {
+        let hwnd = FindWindowW(class_name.as_ptr(), std::ptr::null());
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        (pid != 0).then_some(pid)
+    }
+}
+
+/// How often to poll `explorer_pid()` for the safety-net rebuild above.
+const EXPLORER_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Everything the tick loop touches. winit 0.30 deprecated the old
 /// closure-based `EventLoop::run` in favor of this handler trait run via
 /// `run_app` -- we don't actually care about individual winit events (no
@@ -437,6 +465,8 @@ struct App {
     last_blink: Instant,
     daemon_rx: mpsc::Receiver<DaemonEvent>,
     menu_channel: &'static tray_icon::menu::MenuEventReceiver,
+    last_explorer_pid: Option<u32>,
+    last_explorer_check: Instant,
 }
 
 impl ApplicationHandler for App {
@@ -509,6 +539,23 @@ impl ApplicationHandler for App {
             icon_dirty = true;
         }
 
+        if self.last_explorer_check.elapsed() >= EXPLORER_CHECK_INTERVAL {
+            self.last_explorer_check = Instant::now();
+            let current_pid = explorer_pid();
+            if let (Some(prev), Some(current)) = (self.last_explorer_pid, current_pid) {
+                if prev != current {
+                    eprintln!(
+                        "[specd] explorer.exe restarted (pid {prev} -> {current}), re-registering tray icon"
+                    );
+                    self.tray = create_tray_with_retry(&self.quit_id);
+                    rebuild_menu(&self.tray, &self.quit_id, &self.pending, &self.usage);
+                    self.tray.set_tooltip(Some(tooltip_text(&self.usage))).ok();
+                    icon_dirty = true;
+                }
+            }
+            self.last_explorer_pid = current_pid;
+        }
+
         if icon_dirty {
             self.tray.set_icon(Some(render_icon(self.eyes_open))).ok();
         }
@@ -570,8 +617,35 @@ fn create_tray_with_retry(quit_id: &MenuId) -> TrayIcon {
     panic!("tray icon: giving up after {STARTUP_RETRY_ATTEMPTS} retries");
 }
 
+/// Claims a named OS mutex so at most one `specd` ever runs at a time.
+/// Nothing here relied on that invariant before -- two processes racing to
+/// register a tray icon (e.g. a not-quite-dead previous instance overlapping
+/// with a freshly-launched one across a Fast Startup boot, where the kernel
+/// session resumes from hibernation instead of a true cold start) would
+/// each get their own icon, and Explorer has no way to know they're
+/// supposed to be the same app. The mutex handle is deliberately never
+/// closed: it needs to stay held for the process's entire lifetime, and
+/// Windows releases it automatically on exit regardless of how the process
+/// ends (clean shutdown, TerminateProcess, crash).
+fn acquire_single_instance_lock() -> bool {
+    let name: Vec<u16> = "Local\\SpecWindowsTrayDaemon\0".encode_utf16().collect();
+    unsafe {
+        let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        if handle.is_null() {
+            // CreateMutexW itself failed (not a duplicate) -- don't block
+            // startup over it, just proceed unprotected.
+            return true;
+        }
+        windows_sys::Win32::Foundation::GetLastError() != ERROR_ALREADY_EXISTS
+    }
+}
+
 fn main() {
     eprintln!("[specd] starting, pid={}", std::process::id());
+    if !acquire_single_instance_lock() {
+        eprintln!("[specd] another instance is already running, exiting");
+        return;
+    }
     let event_loop = create_event_loop_with_retry();
 
     let quit_id = MenuId::new("quit");
@@ -602,6 +676,8 @@ fn main() {
         last_blink: Instant::now(),
         daemon_rx,
         menu_channel: MenuEvent::receiver(),
+        last_explorer_pid: explorer_pid(),
+        last_explorer_check: Instant::now(),
     };
 
     event_loop.run_app(&mut app).expect("event loop run");

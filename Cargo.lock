@@ -1891,6 +1891,7 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "tray-icon",
+ "windows-sys 0.59.0",
  "winit",
  "winreg",
  "winrt-notification",
