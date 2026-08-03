@@ -262,6 +262,10 @@ comparar).
   sessões de Claude Code rodando em VMs/containers via SSH (ver
   [Sessões remotas](#sessões-remotas-ssh--vs-code-remote) acima).
 - `daemon/` — `specd` (Rust), bandeja + notificações + estado dos pedidos
-  pendentes + Tarefa Agendada para autostart.
+  pendentes + Tarefa Agendada para autostart. Protegido contra ícones
+  fantasma na bandeja por um mutex nomeado do Windows: se por qualquer
+  motivo duas cópias do `specd.exe` chegarem a coexistir (ex.: race no
+  logon), a segunda sai imediatamente em vez de registrar seu próprio
+  ícone.
 - `install/` — `install.ps1` (fluxo completo) e `merge_settings.ps1`
   (registro do hook/statusLine em `~/.claude/settings.json`).
